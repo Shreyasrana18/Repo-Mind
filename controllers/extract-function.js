@@ -1,7 +1,7 @@
 const axios = require('axios')
 const fs = require('fs').promises
 const path = require('path')
-const { runFunctionExtraction, extractExpressRoutes } = require('../utils/extraction-tools')
+const { extractFunctionMetaData, extractRoutesMetaData } = require('../utils/extraction-tools')
 
 // Fetch repository file tree recursively
 async function fetchTree(owner, repo, currentPath = '') {
@@ -51,7 +51,7 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
                 const { data: code } = await axios.get(node.download_url)
                 console.log(`Extracting functions from: ${nodePath}`)
 
-                const extractedFunctions = await runFunctionExtraction(code, node.name, nodePath)
+                const extractedFunctions = await extractFunctionMetaData(code, node.name, nodePath)
 
                 if (extractedFunctions && extractedFunctions.length > 0) {
                     console.log(`Found ${extractedFunctions.length} functions in ${nodePath}`)
@@ -61,7 +61,7 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
                 }
 
                 // Extract routes if it's a route file
-                const extractedRoutes = extractExpressRoutes(code, node.name, nodePath)
+                const extractedRoutes = extractRoutesMetaData(code, node.name, nodePath, node.download_url)
                 if (extractedRoutes?.length) {
                     console.log(`Found ${extractedRoutes.length} routes in ${nodePath}`)
                     routeResults.push(...extractedRoutes)
@@ -79,9 +79,18 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
 const loadCache = async (cachePath, skipCache, fetchFunction) => {
     if (skipCache) {
         console.log(`Skipping cache for ${path.basename(cachePath)}. Fetching fresh data...`)
-        const data = await fetchFunction()
-        await fs.writeFile(cachePath, JSON.stringify(data, null, 2), 'utf-8')
-        return data
+        try {
+            const data = await fetchFunction()
+            if (data && Object.keys(data).length > 0) {
+                await fs.writeFile(cachePath, JSON.stringify(data, null, 2), 'utf-8')
+            } else {
+                console.error(`Fetched data is empty. Skipping cache write for ${path.basename(cachePath)}.`)
+            }
+            return data
+        } catch (err) {
+            console.error(`Error fetching data: ${err.message}`)
+            return null
+        }
     }
     try {
         await fs.access(cachePath)
@@ -89,9 +98,18 @@ const loadCache = async (cachePath, skipCache, fetchFunction) => {
         return JSON.parse(await fs.readFile(cachePath, 'utf-8'))
     } catch {
         console.log(`${path.basename(cachePath)} not found in cache. Fetching...`)
-        const data = await fetchFunction()
-        await fs.writeFile(cachePath, JSON.stringify(data, null, 2), 'utf-8')
-        return data
+        try {
+            const data = await fetchFunction()
+            if (data && Object.keys(data).length > 0) {
+                await fs.writeFile(cachePath, JSON.stringify(data, null, 2), 'utf-8')
+            } else {
+                console.error(`Fetched data is empty. Skipping cache write for ${path.basename(cachePath)}.`)
+            }
+            return data
+        } catch (err) {
+            console.error(`Error fetching data: ${err.message}`)
+            return null
+        }
     }
 }
 // Scrape repository structure and function data

@@ -1,13 +1,26 @@
 const parser = require('@babel/parser')
+const path = require('path')
 const traverse = require('@babel/traverse').default
 
+function resolveImportedPath(importedFrom, downloadUrl) {
+    const repoPath = downloadUrl
+        .replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, '')
+        .split('/')
+        .slice(0, -1)
+        .join('/')
+
+    const resolvedPath = path.normalize(path.join(repoPath, importedFrom))
+    return resolvedPath
+}
+
 // This function extracts Express routes from a given code string.
-function extractExpressRoutes(code, fileName, filePath) {
+function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
     const ast = parser.parse(code, {
         sourceType: 'module'
     })
 
     const routes = []
+    const seen = new Set()
     const importMap = {}
 
     // First pass: capture imports and require statements
@@ -15,9 +28,7 @@ function extractExpressRoutes(code, fileName, filePath) {
         ImportDeclaration(path) {
             const source = path.node.source.value
             path.node.specifiers.forEach(spec => {
-                if (spec.type === 'ImportSpecifier') {
-                    importMap[spec.local.name] = source
-                } else if (spec.type === 'ImportDefaultSpecifier') {
+                if (spec.type === 'ImportSpecifier' || spec.type === 'ImportDefaultSpecifier') {
                     importMap[spec.local.name] = source
                 }
             })
@@ -32,14 +43,11 @@ function extractExpressRoutes(code, fileName, filePath) {
                     decl.init.arguments[0].type === 'StringLiteral'
                 ) {
                     const source = decl.init.arguments[0].value
-
                     if (decl.id.type === 'ObjectPattern') {
-                        // Destructured require: const { signup, login } = require('../Controllers/userAuthController')
                         decl.id.properties.forEach(prop => {
                             importMap[prop.value.name] = source
                         })
                     } else if (decl.id.type === 'Identifier') {
-                        // Default require: const auth = require('../Controllers/auth')
                         importMap[decl.id.name] = source
                     }
                 }
@@ -53,19 +61,31 @@ function extractExpressRoutes(code, fileName, filePath) {
             const { callee, arguments: args } = path.node
 
             const processRoute = (routePathNode, methodNode, argList) => {
-                const method = methodNode.name.toUpperCase()
+                if (!routePathNode || routePathNode.type !== 'StringLiteral') return
+
+                const method = methodNode.name?.toUpperCase()
+                if (!method || method === 'ROUTE') return
+
                 const routePath = routePathNode.value
+                const routeKey = `${method}:${routePath}`
+                if (seen.has(routeKey)) return
+                seen.add(routeKey)
+
                 const allHandlers = argList.map(arg => {
                     const name = arg.name || 'anonymous'
                     const importPath = importMap[name] || null
+                    if (!importPath) {
+                        return { name, importedFrom: null }
+                    }
+                    const normalizedPath = importPath.startsWith('.')
+                        ? `./${importPath.replace(/^\.\//, '')}`
+                        : importPath
+
+                    const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
 
                     return {
                         name,
-                        importedFrom: importPath
-                            ? (importPath.startsWith('.')
-                                ? `./${importPath.replace(/^\.\//, '')}`
-                                : importPath)
-                            : null
+                        importedFrom: resolvedPath
                     }
                 })
 
@@ -76,7 +96,8 @@ function extractExpressRoutes(code, fileName, filePath) {
                     middlewares: allHandlers.slice(0, -1),
                     handler: allHandlers.at(-1),
                     file: fileName,
-                    filePath: `./${filePath}`
+                    filePath: `${filePath}`,
+                    downloadUrl
                 })
             }
 
@@ -91,7 +112,7 @@ function extractExpressRoutes(code, fileName, filePath) {
                 processRoute(routePathNode, callee.property, args)
             }
 
-            // router.get('/path', middleware?, handler)
+            // router.get('/path', ...)
             if (
                 callee.type === 'MemberExpression' &&
                 callee.object.name === 'router' &&
@@ -108,7 +129,7 @@ function extractExpressRoutes(code, fileName, filePath) {
 }
 
 // This function metadata extracts functions from a given code string.
-async function runFunctionExtraction(code, fileName, filePath) {
+async function extractFunctionMetaData(code, fileName, filePath) {
     try {
         let ast
         if (typeof code === 'string' && code.trim().startsWith('{')) {
@@ -203,6 +224,6 @@ async function runFunctionExtraction(code, fileName, filePath) {
 }
 
 module.exports = {
-    extractExpressRoutes,
-    runFunctionExtraction
+    extractRoutesMetaData,
+    extractFunctionMetaData
 }
