@@ -51,7 +51,7 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
                 const { data: code } = await axios.get(node.download_url)
                 console.log(`Extracting functions from: ${nodePath}`)
 
-                const extractedFunctions = await extractFunctionMetaData(code, node.name, nodePath)
+                const extractedFunctions = await extractFunctionMetaData(code, node.name, nodePath, node.download_url)
 
                 if (extractedFunctions && extractedFunctions.length > 0) {
                     console.log(`Found ${extractedFunctions.length} functions in ${nodePath}`)

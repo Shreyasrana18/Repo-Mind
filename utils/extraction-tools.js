@@ -129,7 +129,7 @@ function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
 }
 
 // This function metadata extracts functions from a given code string.
-async function extractFunctionMetaData(code, fileName, filePath) {
+async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
     try {
         let ast
         if (typeof code === 'string' && code.trim().startsWith('{')) {
@@ -140,26 +140,148 @@ async function extractFunctionMetaData(code, fileName, filePath) {
                 locations: true
             })
         }
+
+        const importMap = {}
         const functions = []
+
+        // Capture import and require statements to help resolve where functions come from
+        traverse(ast, {
+            ImportDeclaration(path) {
+                const source = path.node.source.value
+                path.node.specifiers.forEach(spec => {
+                    if (spec.type === 'ImportSpecifier' || spec.type === 'ImportDefaultSpecifier') {
+                        importMap[spec.local.name] = source
+                    }
+                })
+            },
+            VariableDeclaration(path) {
+                path.node.declarations.forEach(decl => {
+                    if (
+                        decl.init &&
+                        decl.init.type === 'CallExpression' &&
+                        decl.init.callee.name === 'require' &&
+                        decl.init.arguments.length === 1 &&
+                        decl.init.arguments[0].type === 'StringLiteral'
+                    ) {
+                        const source = decl.init.arguments[0].value
+                        if (decl.id.type === 'ObjectPattern') {
+                            decl.id.properties.forEach(prop => {
+                                importMap[prop.value.name] = source
+                            })
+                        } else if (decl.id.type === 'Identifier') {
+                            importMap[decl.id.name] = source
+                        }
+                    }
+                })
+            }
+        })
+        function extractUsedFunctions(funcPath, importMap) {
+            const used = []
+
+            // Collect all variables declared or passed into this function
+            const declaredVariables = new Set()
+
+            // Add function parameters (req, res, next)
+            funcPath.node.params?.forEach(param => {
+                if (param.type === 'Identifier') declaredVariables.add(param.name)
+            })
+
+            // Traverse inside the function to collect used functions
+            funcPath.traverse({
+                VariableDeclarator(innerPath) {
+                    if (innerPath.node.id.type === 'Identifier') {
+                        declaredVariables.add(innerPath.node.id.name)
+                    }
+                },
+                FunctionDeclaration(innerPath) {
+                    if (innerPath.node.id?.name) {
+                        declaredVariables.add(innerPath.node.id.name)
+                    }
+                },
+                CallExpression(innerPath) {
+                    const callee = innerPath.node.callee
+
+                    if (callee.type === 'Identifier') {
+                        if (!declaredVariables.has(callee.name)) {
+                            const importedFrom = importMap[callee.name]
+                            if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
+                                const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
+                                const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
+                                used.push({
+                                    name: callee.name,
+                                    importedFrom: resolvedPath,
+                                    type: 'module'
+                                })
+                            } else {
+                                used.push({
+                                    name: callee.name,
+                                    importedFrom: importedFrom,
+                                    type: 'library'
+                                })
+                            }
+                        }
+                    }
+
+                    if (callee.type === 'MemberExpression') {
+                        const object = callee.object
+                        const property = callee.property
+
+                        if (
+                            object.type === 'Identifier' &&
+                            property.type === 'Identifier' &&
+                            !declaredVariables.has(object.name)
+                        ) {
+                            const importedFrom = importMap[object.name]
+                            if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
+                                // Local file/module
+                                const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
+                                const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
+
+                                used.push({
+                                    name: `${object.name}.${property.name}`,
+                                    importedFrom: resolvedPath,
+                                    type: 'module'
+                                })
+                            } else {
+                                // Library
+                                used.push({
+                                    name: `${object.name}.${property.name}`,
+                                    importedFrom: importedFrom,
+                                    type: 'library'
+                                })
+                            }
+
+                        }
+                    }
+                }
+            })
+            return used
+        }
+        const collectFunction = (name, type, path) => {
+            const { start, end } = path.node
+            const funcCode = code.slice(start, end)
+            const usedFns = extractUsedFunctions(path, importMap)
+            functions.push({
+                name,
+                type,
+                location: {
+                    start: path.node.loc.start,
+                    end: path.node.loc.end
+                },
+                code: funcCode,
+                downloadUrl,
+                functionsUsed: usedFns,
+                file: fileName,
+                path: filePath
+            })
+        }
+
         traverse(ast, {
             FunctionDeclaration(path) {
-                const { start, end } = path.node
-                const funcCode = code.slice(start, end)
-                functions.push({
-                    name: path.node.id.name,
-                    type: 'FunctionDeclaration',
-                    location: {
-                        start: path.node.loc.start,
-                        end: path.node.loc.end
-                    },
-                    code: funcCode,
-                    file: fileName,
-                    path: filePath
-                })
+                collectFunction(path.node.id.name, 'FunctionDeclaration', path)
             },
             ArrowFunctionExpression(path) {
                 let name = 'anonymous'
-
                 if (
                     path.parent.type === 'CallExpression' &&
                     path.parentPath.parent.type === 'VariableDeclarator' &&
@@ -178,20 +300,7 @@ async function extractFunctionMetaData(code, fileName, filePath) {
                     name = path.parent.key.name
                 }
 
-                const { start, end } = path.node
-                const funcCode = code.slice(start, end)
-
-                functions.push({
-                    name,
-                    type: 'ArrowFunction',
-                    location: {
-                        start: path.node.loc.start,
-                        end: path.node.loc.end
-                    },
-                    code: funcCode,
-                    file: fileName,
-                    path: filePath
-                })
+                collectFunction(name, 'ArrowFunction', path)
             },
             AssignmentExpression(path) {
                 if (
@@ -210,12 +319,14 @@ async function extractFunctionMetaData(code, fileName, filePath) {
                             end: path.node.loc.end
                         },
                         code: funcCode,
+                        functionsUsed: [],
                         file: fileName,
                         path: filePath
                     })
                 }
             }
         })
+
         return functions
     } catch (err) {
         console.error(`Error parsing code in ${fileName}:`, err.message)
