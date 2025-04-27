@@ -131,14 +131,22 @@ function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
 // This function metadata extracts functions from a given code string.
 async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
     try {
+        if (typeof code !== 'string') {
+            throw new Error('Invalid code input: Expected a string')
+        }
+
         let ast
-        if (typeof code === 'string' && code.trim().startsWith('{')) {
-            ast = JSON.parse(code)
-        } else {
-            ast = parser.parse(code, {
-                sourceType: 'module',
-                locations: true
-            })
+        try {
+            if (code.trim().startsWith('{')) {
+                ast = JSON.parse(code)
+            } else {
+                ast = parser.parse(code, {
+                    sourceType: 'module',
+                    locations: true,
+                })
+            }
+        } catch (parseErr) {
+            throw new Error(`Code parsing failed: ${parseErr.message}`)
         }
 
         const importMap = {}
@@ -175,6 +183,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                 })
             }
         })
+
         function extractUsedFunctions(funcPath, importMap) {
             const used = []
 
@@ -204,20 +213,22 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                     if (callee.type === 'Identifier') {
                         if (!declaredVariables.has(callee.name)) {
                             const importedFrom = importMap[callee.name]
-                            if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
-                                const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
-                                const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
-                                used.push({
-                                    name: callee.name,
-                                    importedFrom: resolvedPath,
-                                    type: 'module'
-                                })
-                            } else {
-                                used.push({
-                                    name: callee.name,
-                                    importedFrom: importedFrom,
-                                    type: 'library'
-                                })
+                            if (importedFrom) {
+                                if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
+                                    const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
+                                    const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
+                                    used.push({
+                                        name: callee.name,
+                                        importedFrom: resolvedPath,
+                                        type: 'module'
+                                    })
+                                } else {
+                                    used.push({
+                                        name: callee.name,
+                                        importedFrom: importedFrom,
+                                        type: 'library'
+                                    })
+                                }
                             }
                         }
                     }
@@ -232,38 +243,50 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                             !declaredVariables.has(object.name)
                         ) {
                             const importedFrom = importMap[object.name]
-                            if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
-                                // Local file/module
-                                const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
-                                const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
+                            if (importedFrom) {
+                                if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
+                                    // Local file/module
+                                    const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
+                                    const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
 
-                                used.push({
-                                    name: `${object.name}.${property.name}`,
-                                    importedFrom: resolvedPath,
-                                    type: 'module'
-                                })
-                            } else {
-                                // Library
-                                used.push({
-                                    name: `${object.name}.${property.name}`,
-                                    importedFrom: importedFrom,
-                                    type: 'library'
-                                })
+                                    used.push({
+                                        name: `${object.name}.${property.name}`,
+                                        importedFrom: resolvedPath,
+                                        type: 'module'
+                                    })
+                                } else {
+                                    // Library
+                                    used.push({
+                                        name: `${object.name}.${property.name}`,
+                                        importedFrom: importedFrom,
+                                        type: 'library'
+                                    })
+                                }
                             }
-
                         }
                     }
                 }
             })
+
             return used
         }
-        const collectFunction = (name, type, path) => {
+
+        function detectFunctionType(paramsLength, baseType) {
+            if (paramsLength === 2) return "RouteHandler"
+            if (paramsLength > 2) return "Middleware"
+            return baseType
+        }
+
+        const collectFunction = (name, baseType, path) => {
             const { start, end } = path.node
             const funcCode = code.slice(start, end)
             const usedFns = extractUsedFunctions(path, importMap)
+            const paramsLength = path.node.params?.length || 0
+            const actualType = detectFunctionType(paramsLength, baseType)
+
             functions.push({
                 name,
-                type,
+                type: actualType,
                 location: {
                     start: path.node.loc.start,
                     end: path.node.loc.end
@@ -333,6 +356,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
         return []
     }
 }
+
 
 module.exports = {
     extractRoutesMetaData,
