@@ -277,14 +277,14 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
             return baseType
         }
 
-        const collectFunction = (name, baseType, path) => {
+        const collectFunction = async (name, baseType, path) => {
             const { start, end } = path.node
             const funcCode = code.slice(start, end)
             const usedFns = extractUsedFunctions(path, importMap)
             const paramsLength = path.node.params?.length || 0
             const actualType = detectFunctionType(paramsLength, baseType)
 
-            functions.push({
+            const functionData = {
                 name,
                 type: actualType,
                 location: {
@@ -296,7 +296,10 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                 functionsUsed: usedFns,
                 file: fileName,
                 path: filePath
-            })
+            }
+
+            const processedData = await processFunctionWithGPT(functionData)
+            functions.push(processedData)
         }
 
         traverse(ast, {
@@ -334,7 +337,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                     const { start, end } = path.node
                     const funcCode = code.slice(start, end)
 
-                    functions.push({
+                    const functionData = {
                         name: path.node.left.property.name,
                         type: 'Exported Function',
                         location: {
@@ -345,6 +348,10 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                         functionsUsed: [],
                         file: fileName,
                         path: filePath
+                    }
+
+                    processFunctionWithGPT(functionData).then(processedData => {
+                        functions.push(processedData)
                     })
                 }
             }
@@ -357,8 +364,290 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
     }
 }
 
+// This function extracts Mongoose model metadata from a given code string.
+function extractModelMetaData(code, fileName, filePath, downloadUrl) {
+    try {
+        if (typeof code !== 'string') {
+            throw new Error('Invalid code input: Expected a string')
+        }
+
+        const ast = parser.parse(code, {
+            sourceType: 'module',
+            locations: true,
+        })
+
+        const models = []
+        const importMap = {}
+
+        // First pass: capture imports and require statements
+        traverse(ast, {
+            ImportDeclaration(path) {
+                const source = path.node.source.value
+                path.node.specifiers.forEach(spec => {
+                    if (spec.type === 'ImportSpecifier' || spec.type === 'ImportDefaultSpecifier') {
+                        importMap[spec.local.name] = source
+                    }
+                })
+            },
+            VariableDeclaration(path) {
+                path.node.declarations.forEach(decl => {
+                    if (
+                        decl.init &&
+                        decl.init.type === 'CallExpression' &&
+                        decl.init.callee.name === 'require' &&
+                        decl.init.arguments.length === 1 &&
+                        decl.init.arguments[0].type === 'StringLiteral'
+                    ) {
+                        const source = decl.init.arguments[0].value
+                        if (decl.id.type === 'ObjectPattern') {
+                            decl.id.properties.forEach(prop => {
+                                importMap[prop.value.name] = source
+                            })
+                        } else if (decl.id.type === 'Identifier') {
+                            importMap[decl.id.name] = source
+                        }
+                    }
+                })
+            }
+        })
+
+        // Second pass: extract model definitions
+        traverse(ast, {
+            CallExpression(path) {
+                // Look for mongoose.model() calls
+                if (
+                    path.node.callee.type === 'MemberExpression' &&
+                    path.node.callee.object.name === 'mongoose' &&
+                    path.node.callee.property.name === 'model' &&
+                    path.node.arguments.length >= 2
+                ) {
+                    const modelName = path.node.arguments[0].value
+
+                    // Find the schema definition
+                    let schemaDefinition = null
+                    let schemaNode = null
+
+                    // Look for schema definition in the AST
+                    traverse(ast, {
+                        VariableDeclaration(schemaPath) {
+                            schemaPath.node.declarations.forEach(decl => {
+                                if (
+                                    decl.id.name === 'noteSchema' ||
+                                    decl.id.name === 'userSchema' ||
+                                    decl.id.name.toLowerCase().includes('schema')
+                                ) {
+                                    if (decl.init && decl.init.type === 'CallExpression' &&
+                                        decl.init.callee.type === 'MemberExpression' &&
+                                        decl.init.callee.object.name === 'mongoose' &&
+                                        decl.init.callee.property.name === 'Schema') {
+                                        schemaDefinition = decl.init
+                                        schemaNode = decl.init.arguments[0]
+                                    }
+                                }
+                            })
+                        }
+                    })
+
+                    // Extract schema definition
+                    const schema = {}
+                    if (schemaNode && schemaNode.type === 'ObjectExpression') {
+                        schemaNode.properties.forEach(prop => {
+                            if (prop.key.type === 'Identifier') {
+                                const fieldName = prop.key.name
+                                const fieldDefinition = extractFieldDefinition(prop.value)
+                                schema[fieldName] = fieldDefinition
+                            }
+                        })
+                    }
+
+                    // Get the full model code
+                    const modelCode = code.slice(path.node.start, path.node.end)
+                    const schemaCode = schemaDefinition ? code.slice(schemaDefinition.start, schemaDefinition.end) : ''
+
+                    models.push({
+                        name: modelName,
+                        schema,
+                        location: {
+                            start: path.node.loc.start,
+                            end: path.node.loc.end
+                        },
+                        code: modelCode,
+                        schemaCode: schemaCode,
+                        file: fileName,
+                        path: filePath,
+                        downloadUrl
+                    })
+                }
+            }
+        })
+
+        return models
+    } catch (err) {
+        console.error(`Error parsing model in ${fileName}:`, err.message)
+        return []
+    }
+}
+
+// Helper function to extract field definition information
+function extractFieldDefinition(node) {
+    const fieldDef = {
+        type: 'Mixed',
+        required: false,
+        default: undefined,
+        unique: false,
+        index: false,
+        validate: undefined,
+        enum: undefined,
+        min: undefined,
+        max: undefined,
+        minlength: undefined,
+        maxlength: undefined,
+        match: undefined,
+        ref: undefined,
+        sparse: false,
+        trim: false,
+        uppercase: false,
+        lowercase: false
+    }
+
+    if (node.type === 'ObjectExpression') {
+        node.properties.forEach(prop => {
+            const propName = prop.key.name
+            const propValue = prop.value
+
+            switch (propName) {
+                case 'type':
+                    if (propValue.type === 'MemberExpression') {
+                        fieldDef.type = propValue.property.name
+                    } else if (propValue.type === 'StringLiteral') {
+                        fieldDef.type = propValue.value
+                    } else if (propValue.type === 'ArrayExpression') {
+                        fieldDef.type = 'Array'
+                        fieldDef.items = propValue.elements.map(elem => {
+                            if (elem.type === 'MemberExpression') {
+                                return elem.property.name
+                            }
+                            return elem.value
+                        })
+                    }
+                    break
+                case 'required':
+                    fieldDef.required = propValue.value
+                    break
+                case 'default':
+                    if (propValue.type === 'CallExpression' &&
+                        propValue.callee.name === 'Date' &&
+                        propValue.callee.property?.name === 'now') {
+                        fieldDef.default = 'Date.now'
+                    } else {
+                        fieldDef.default = propValue.value
+                    }
+                    break
+                case 'unique':
+                    fieldDef.unique = propValue.value
+                    break
+                case 'index':
+                    fieldDef.index = propValue.value
+                    break
+                case 'validate':
+                    if (propValue.type === 'ObjectExpression') {
+                        fieldDef.validate = {
+                            validator: propValue.properties.find(p => p.key.name === 'validator')?.value.value,
+                            message: propValue.properties.find(p => p.key.name === 'message')?.value.value
+                        }
+                    }
+                    break
+                case 'enum':
+                    if (propValue.type === 'ArrayExpression') {
+                        fieldDef.enum = propValue.elements.map(elem => elem.value)
+                    }
+                    break
+                case 'min':
+                    fieldDef.min = propValue.value
+                    break
+                case 'max':
+                    fieldDef.max = propValue.value
+                    break
+                case 'minlength':
+                    fieldDef.minlength = propValue.value
+                    break
+                case 'maxlength':
+                    fieldDef.maxlength = propValue.value
+                    break
+                case 'match':
+                    fieldDef.match = propValue.value
+                    break
+                case 'ref':
+                    fieldDef.ref = propValue.value
+                    break
+                case 'sparse':
+                    fieldDef.sparse = propValue.value
+                    break
+                case 'trim':
+                    fieldDef.trim = propValue.value
+                    break
+                case 'uppercase':
+                    fieldDef.uppercase = propValue.value
+                    break
+                case 'lowercase':
+                    fieldDef.lowercase = propValue.value
+                    break
+            }
+        })
+    } else if (node.type === 'MemberExpression') {
+        fieldDef.type = node.property.name
+    } else if (node.type === 'StringLiteral') {
+        fieldDef.type = node.value
+    }
+
+    // Remove undefined properties
+    Object.keys(fieldDef).forEach(key => {
+        if (fieldDef[key] === undefined) {
+            delete fieldDef[key]
+        }
+    })
+
+    return fieldDef
+}
+
+async function processFunctionWithGPT(functionData) {
+    try {
+        const { name, type, functionsUsed, file, path } = functionData
+        const text = `Function Name: ${name}
+                        Type: ${type}
+                        Location: ${file} (${path})
+                        Functions Used: ${functionsUsed.map(fn => `${fn.name}${fn.importedFrom ? ` (from ${fn.importedFrom})` : ''}`).join(', ')}`
+
+
+        const enrichedData = {
+            ...functionData,
+            text
+        }
+
+        // TODO: 
+        // const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+        //     model: "gpt-3.5-turbo",
+        //     messages: [{
+        //         role: "user",
+        //         content: text
+        //     }]
+        // }, {
+        //     headers: {
+        //         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        //         'Content-Type': 'application/json'
+        //     }
+        // })
+
+        return enrichedData
+    } catch (error) {
+        console.error('Error processing function with GPT:', error)
+        return functionData
+    }
+}
 
 module.exports = {
     extractRoutesMetaData,
-    extractFunctionMetaData
+    extractFunctionMetaData,
+    extractModelMetaData,
+    processFunctionWithGPT
 }

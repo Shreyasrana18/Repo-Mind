@@ -1,7 +1,7 @@
 const axios = require('axios')
 const fs = require('fs').promises
 const path = require('path')
-const { extractFunctionMetaData, extractRoutesMetaData } = require('../utils/extraction-tools')
+const { extractFunctionMetaData, extractRoutesMetaData, extractModelMetaData } = require('../utils/extraction-tools')
 
 // Fetch repository file tree recursively
 async function fetchTree(owner, repo, currentPath = '') {
@@ -38,13 +38,13 @@ async function fetchTree(owner, repo, currentPath = '') {
     return tree
 }
 
-async function extractFunctionsFromTree(tree, owner, repo, functionResults = [], routeResults = [], currentPath = '') {
+async function extractFunctionsFromTree(tree, owner, repo, functionResults = [], routeResults = [], modelResults = [], currentPath = '') {
     for (const node of tree) {
         const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name
 
         if (node.type === 'folder' && node.children) {
             console.log(`Entering folder: ${nodePath}`)
-            await extractFunctionsFromTree(node.children, owner, repo, functionResults, routeResults, nodePath)
+            await extractFunctionsFromTree(node.children, owner, repo, functionResults, routeResults, modelResults, nodePath)
         } else if (node.type === 'file' && node.name.endsWith('.js') && node.download_url) {
             try {
                 console.log(`Fetching file: ${nodePath}`)
@@ -66,6 +66,13 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
                     console.log(`Found ${extractedRoutes.length} routes in ${nodePath}`)
                     routeResults.push(...extractedRoutes)
                 }
+
+                // Extract models
+                const extractedModels = extractModelMetaData(code, node.name, nodePath, node.download_url)
+                if (extractedModels?.length) {
+                    console.log(`Found ${extractedModels.length} models in ${nodePath}`)
+                    modelResults.push(...extractedModels)
+                }
             } catch (err) {
                 console.warn(`Error fetching or processing ${node.name}: ${err.message}`)
             }
@@ -73,7 +80,7 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
             console.log(`Skipping non-JS file or folder: ${node.name}`)
         }
     }
-    return { functionResults, routeResults }
+    return { functionResults, routeResults, modelResults }
 }
 
 const loadCache = async (cachePath, skipCache, fetchFunction) => {
@@ -118,9 +125,9 @@ async function scrapeDirectory(owner, repo, skipCache = false) {
     const functionCachePath = path.join(__dirname, `${owner}-${repo}-functions.json`)
 
     const tree = await loadCache(structureCachePath, skipCache, () => fetchTree(owner, repo))
-    const { functionResults, routeResults } = await loadCache(functionCachePath, skipCache, () => extractFunctionsFromTree(tree, owner, repo))
+    const { functionResults, routeResults, modelResults } = await loadCache(functionCachePath, skipCache, () => extractFunctionsFromTree(tree, owner, repo))
 
-    return { tree, functionResults, routeResults }
+    return { tree, functionResults, routeResults, modelResults }
 }
 
 module.exports = { scrapeDirectory }
