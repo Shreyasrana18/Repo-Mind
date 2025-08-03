@@ -2,6 +2,7 @@ const axios = require('axios')
 const fs = require('fs').promises
 const path = require('path')
 const { extractFunctionMetaData, extractRoutesMetaData, extractModelMetaData } = require('../utils/extraction-tools')
+const { enrichAllMetadata } = require('../utils/summarize-tool')
 
 // Fetch repository file tree recursively
 async function fetchTree(owner, repo, currentPath = '') {
@@ -126,7 +127,9 @@ async function scrapeDirectory(owner, repo, skipCache = false) {
 
     const tree = await loadCache(structureCachePath, skipCache, () => fetchTree(owner, repo))
     const { functionResults, routeResults, modelResults } = await loadCache(functionCachePath, skipCache, () => extractFunctionsFromTree(tree, owner, repo))
-
+    
+    // enrich data with summaries
+    await enrichAllMetadata(functionCachePath)
     return { tree, functionResults, routeResults, modelResults }
 }
 

@@ -298,8 +298,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                 path: filePath
             }
 
-            const processedData = await processFunctionWithGPT(functionData)
-            functions.push(processedData)
+            functions.push(functionData)
         }
 
         traverse(ast, {
@@ -349,10 +348,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                         file: fileName,
                         path: filePath
                     }
-
-                    processFunctionWithGPT(functionData).then(processedData => {
-                        functions.push(processedData)
-                    })
+                    functions.push(functionData)
                 }
             }
         })
@@ -610,44 +606,9 @@ function extractFieldDefinition(node) {
     return fieldDef
 }
 
-async function processFunctionWithGPT(functionData) {
-    try {
-        const { name, type, functionsUsed, file, path } = functionData
-        const text = `Function Name: ${name}
-                        Type: ${type}
-                        Location: ${file} (${path})
-                        Functions Used: ${functionsUsed.map(fn => `${fn.name}${fn.importedFrom ? ` (from ${fn.importedFrom})` : ''}`).join(', ')}`
-
-
-        const enrichedData = {
-            ...functionData,
-            text
-        }
-
-        // TODO: 
-        // const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-        //     model: "gpt-3.5-turbo",
-        //     messages: [{
-        //         role: "user",
-        //         content: text
-        //     }]
-        // }, {
-        //     headers: {
-        //         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        //         'Content-Type': 'application/json'
-        //     }
-        // })
-
-        return enrichedData
-    } catch (error) {
-        console.error('Error processing function with GPT:', error)
-        return functionData
-    }
-}
 
 module.exports = {
     extractRoutesMetaData,
     extractFunctionMetaData,
-    extractModelMetaData,
-    processFunctionWithGPT
+    extractModelMetaData
 }
