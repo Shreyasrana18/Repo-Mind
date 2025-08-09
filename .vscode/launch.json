@@ -4,19 +4,14 @@
         {
             "type": "node",
             "request": "launch",
-            "name": "Launch Program",
-            "skipFiles": [
-                "<node_internals>/**"
-            ],
+            "name": "Run Backend",
             "runtimeExecutable": "npm",
             "runtimeArgs": [
                 "run",
-                "dev"
+                "start"
             ],
-            "env": {
-                "NODE_ENV": "development"
-            },
-            "program": "${workspaceFolder}/server.js"
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal"
         }
     ]
 }

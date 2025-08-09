@@ -4,6 +4,7 @@ const axios = require('axios')
 require('dotenv').config()
 const API_KEY = process.env.ai_key
 const API_KEY_HORIZON = process.env.ai_key_2
+const API_KEY_GPT = process.env.ai_key_gpt
 
 const generateTextSummaryMetaLlama = async (prompt, record) => {
     try {
@@ -26,6 +27,35 @@ const generateTextSummaryMetaLlama = async (prompt, record) => {
         return ''
     }
 }
+const contextSearch = async (prompt) => {
+    try {
+        const messages = [
+            {
+                role: 'user',
+                content: [
+                    { type: 'text', text: prompt }
+                ]
+            }
+        ]
+        const res = await axios.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            {
+                model: 'openai/gpt-oss-20b:free',
+                messages
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${API_KEY_GPT}`
+                }
+            }
+        )
+        return res.data.choices?.[0]?.message?.content?.trim() || ''
+    } catch (err) {
+        console.error(`Error generating summary (Horizon Beta): ${err.message}`)
+        return ''
+    }
+}
 const generateTextSummaryHorizonBeta = async (prompt, record) => {
     try {
         const messages = [
@@ -39,7 +69,7 @@ const generateTextSummaryHorizonBeta = async (prompt, record) => {
         const res = await axios.post(
             'https://openrouter.ai/api/v1/chat/completions',
             {
-                model: 'openrouter/horizon-beta',
+                model: 'openai/gpt-oss-20b:free',
                 messages
             },
             {
@@ -99,4 +129,4 @@ const enrichAllMetadata = async (inputFilePath) => {
     console.log(`✅ Metadata enriched and saved to ${path.basename(inputFilePath)}`)
 }
 
-module.exports = { enrichAllMetadata }
+module.exports = { enrichAllMetadata, generateTextSummaryHorizonBeta, contextSearch }

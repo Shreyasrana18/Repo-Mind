@@ -13,7 +13,7 @@ with open(input_path, 'r') as f:
     data = json.load(f)
 
 # Only loop through entries with textSummary
-for section in ["functionResults","routeResults", "modelResults"]:
+for section in ["functionResults","routeResults","modelResults"]:
     records = data.get(section, [])
     for record in records:
         summary = record.get('textSummary')
