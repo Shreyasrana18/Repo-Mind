@@ -52,7 +52,7 @@ const contextSearch = async (prompt) => {
         )
         return res.data.choices?.[0]?.message?.content?.trim() || ''
     } catch (err) {
-        console.error(`Error generating summary (Horizon Beta): ${err.message}`)
+        console.error(`Error generating summary: ${err.message}`)
         return ''
     }
 }
