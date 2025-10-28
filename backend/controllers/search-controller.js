@@ -1,4 +1,4 @@
-const searchUtil = require('../utils/searchHelper')
+const searchUtil = require('../utils/search-helper')
 const { contextSearch } = require('../utils/summarize-tool')
 
 async function search(req, res) {

@@ -6,27 +6,7 @@ const API_KEY = process.env.ai_key
 const API_KEY_HORIZON = process.env.ai_key_2
 const API_KEY_GPT = process.env.ai_key_gpt
 
-const generateTextSummaryMetaLlama = async (prompt, record) => {
-    try {
-        const res = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            {
-                model: 'meta-llama/llama-3.2-3b-instruct:free',
-                messages: [{ role: 'user', content: prompt }]
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${API_KEY}`
-                }
-            }
-        )
-        return res.data.choices?.[0]?.message?.content?.trim() || ''
-    } catch (err) {
-        console.error(`Error generating summary (Meta Llama) for ${record.file || record.name}: ${err.message}`)
-        return ''
-    }
-}
+
 const contextSearch = async (prompt) => {
     try {
         const messages = [
@@ -116,7 +96,7 @@ const enrichAllMetadata = async (inputFilePath) => {
                 const summary = await generateTextSummary(record, type)
                 console.log(`Generated summary for ${type} ${record.name || record.file}`)
                 record.textSummary = summary
-                await delay(5000)
+                await delay(2000)
             }
         }
     }
@@ -129,4 +109,4 @@ const enrichAllMetadata = async (inputFilePath) => {
     console.log(`✅ Metadata enriched and saved to ${path.basename(inputFilePath)}`)
 }
 
-module.exports = { enrichAllMetadata, generateTextSummaryHorizonBeta, contextSearch }
+module.exports = { enrichAllMetadata, generateTextSummaryHorizonBeta, contextSearch, generateTextSummary }

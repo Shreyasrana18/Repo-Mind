@@ -1,6 +1,7 @@
 const parser = require('@babel/parser')
 const path = require('path')
 const traverse = require('@babel/traverse').default
+const { sendToKafka } = require('../kafka/producer')
 
 function resolveImportedPath(importedFrom, downloadUrl) {
     const repoPath = downloadUrl
@@ -60,7 +61,7 @@ function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
         CallExpression(path) {
             const { callee, arguments: args } = path.node
 
-            const processRoute = (routePathNode, methodNode, argList) => {
+            const processRoute = async (routePathNode, methodNode, argList) => {
                 if (!routePathNode || routePathNode.type !== 'StringLiteral') return
 
                 const method = methodNode.name?.toUpperCase()
@@ -88,8 +89,7 @@ function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
                         importedFrom: resolvedPath
                     }
                 })
-
-                routes.push({
+                const routesData = {
                     kind: 'route',
                     path: routePath,
                     method,
@@ -98,7 +98,9 @@ function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
                     file: fileName,
                     filePath: `${filePath}`,
                     downloadUrl
-                })
+                }
+                await sendToKafka('summary-topic', { type: "route", data: routesData })
+                routes.push(routesData)
             }
 
             // router.route('/path').get(...)
@@ -297,7 +299,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                 file: fileName,
                 path: filePath
             }
-
+            await sendToKafka('summary-topic', { type: "function", data: functionData })
             functions.push(functionData)
         }
 
@@ -327,7 +329,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
 
                 collectFunction(name, 'ArrowFunction', path)
             },
-            AssignmentExpression(path) {
+            async AssignmentExpression(path) {
                 if (
                     path.node.left.type === 'MemberExpression' &&
                     path.node.left.object.name === 'module' &&
@@ -348,6 +350,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                         file: fileName,
                         path: filePath
                     }
+                    await sendToKafka('summary-topic', { type: "function", data: functionData })
                     functions.push(functionData)
                 }
             }
@@ -460,7 +463,7 @@ function extractModelMetaData(code, fileName, filePath, downloadUrl) {
                     const modelCode = code.slice(path.node.start, path.node.end)
                     const schemaCode = schemaDefinition ? code.slice(schemaDefinition.start, schemaDefinition.end) : ''
 
-                    models.push({
+                    const modelData = {
                         name: modelName,
                         schema,
                         location: {
@@ -472,7 +475,9 @@ function extractModelMetaData(code, fileName, filePath, downloadUrl) {
                         file: fileName,
                         path: filePath,
                         downloadUrl
-                    })
+                    }
+                    sendToKafka('summary-topic', { type: "model", data: modelData })
+                    models.push(modelData)
                 }
             }
         })

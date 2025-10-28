@@ -3,6 +3,7 @@ const fs = require('fs').promises
 const path = require('path')
 const { extractFunctionMetaData, extractRoutesMetaData, extractModelMetaData } = require('../utils/extraction-tools')
 const { enrichAllMetadata } = require('../utils/summarize-tool')
+const { client } = require('../db/pg')
 
 // Fetch repository file tree recursively
 async function fetchTree(owner, repo, currentPath = '') {
@@ -84,52 +85,28 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
     return { functionResults, routeResults, modelResults }
 }
 
-const loadCache = async (cachePath, skipCache, fetchFunction) => {
-    if (skipCache) {
-        console.log(`Skipping cache for ${path.basename(cachePath)}. Fetching fresh data...`)
-        try {
-            const data = await fetchFunction()
-            if (data && Object.keys(data).length > 0) {
-                await fs.writeFile(cachePath, JSON.stringify(data, null, 2), 'utf-8')
-            } else {
-                console.error(`Fetched data is empty. Skipping cache write for ${path.basename(cachePath)}.`)
-            }
-            return data
-        } catch (err) {
-            console.error(`Error fetching data: ${err.message}`)
-            return null
-        }
-    }
-    try {
-        await fs.access(cachePath)
-        console.log(`${path.basename(cachePath)} loaded from cache.`)
-        return JSON.parse(await fs.readFile(cachePath, 'utf-8'))
-    } catch {
-        console.log(`${path.basename(cachePath)} not found in cache. Fetching...`)
-        try {
-            const data = await fetchFunction()
-            if (data && Object.keys(data).length > 0) {
-                await fs.writeFile(cachePath, JSON.stringify(data, null, 2), 'utf-8')
-            } else {
-                console.error(`Fetched data is empty. Skipping cache write for ${path.basename(cachePath)}.`)
-            }
-            return data
-        } catch (err) {
-            console.error(`Error fetching data: ${err.message}`)
-            return null
-        }
-    }
-}
 // Scrape repository structure and function data
 async function scrapeDirectory(owner, repo, skipCache = false) {
-    const structureCachePath = path.join(__dirname, `${owner}-${repo}-structure.json`)
-    const functionCachePath = path.join(__dirname, `${owner}-${repo}-functions.json`)
+    const tree = await fetchTree(owner, repo)
 
-    const tree = await loadCache(structureCachePath, skipCache, () => fetchTree(owner, repo))
-    const { functionResults, routeResults, modelResults } = await loadCache(functionCachePath, skipCache, () => extractFunctionsFromTree(tree, owner, repo))
+    if (tree && tree.length > 0) {
+      const repoId = `${owner}/${repo}`
+        try {
+        const res = await client.query('SELECT id FROM meta_owner WHERE repo_id = $1', [repoId])
+        if (res.rowCount === 0) {
+          await client.query('INSERT INTO meta_owner (repo_id) VALUES ($1)', [repoId])
+          console.log(`Inserted repo ${repoId} into meta_owner`)
+        } else {
+          console.log(`Repo ${repoId} already exists in meta_owner`)
+        }
+        } catch (err) {
+        console.error(`DB error inserting repo ${repoId}: ${err.message}`)
+      }
+    }
+    const { functionResults, routeResults, modelResults } = await extractFunctionsFromTree(tree, owner, repo)
     
-    // enrich data with summaries
-    await enrichAllMetadata(functionCachePath)
+    // // enrich data with summaries
+    // await enrichAllMetadata(functionCachePath)
     return { tree, functionResults, routeResults, modelResults }
 }
 

@@ -2,13 +2,17 @@ const axios = require("axios")
 const cosine = require("./cosine")
 const embeddingStore = require("../controllers/Shreyasrana18-Notes-API-functions.json")
 
+
+async function generateEmbeddings(texts) {
+    const { data } = await axios.post("http://127.0.0.1:8000/generate-embeddings", {
+        texts: [texts]
+    })
+    return data.embeddings[0]
+}
 async function searchInCategories(query, categories) {
     let allResults = []
 
-    const { data } = await axios.post("http://127.0.0.1:8001/generate-embeddings", {
-        texts: [query]
-    })
-    const queryEmbedding = data.embeddings[0]
+    const queryEmbedding = await generateEmbeddings(query)
 
     for (const category of categories) {
         const store = embeddingStore[category]
@@ -54,9 +58,9 @@ const buildPrompt = (userQuery, results) => {
         `Result ${index + 1}:
             Name: ${item.name}
             Summary: ${item.summary}`
-                ).join("\n\n")
+    ).join("\n\n")
 
-                return `
+    return `
             You are an AI assistant. Answer the user's question using ONLY the information provided below.
             If the answer is not contained in the provided context, say "I don't have enough information to answer that."
 
@@ -70,4 +74,4 @@ const buildPrompt = (userQuery, results) => {
                 `.trim()
 }
 
-module.exports = { buildPrompt, detectCategories, searchInCategories}
+module.exports = { buildPrompt, detectCategories, searchInCategories, generateEmbeddings }
