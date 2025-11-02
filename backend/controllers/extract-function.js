@@ -40,20 +40,20 @@ async function fetchTree(owner, repo, currentPath = '') {
     return tree
 }
 
-async function extractFunctionsFromTree(tree, owner, repo, functionResults = [], routeResults = [], modelResults = [], currentPath = '') {
+async function extractFunctionsFromTree(tree, owner, repo, dbId, functionResults = [], routeResults = [], modelResults = [], currentPath = '') {
     for (const node of tree) {
         const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name
 
         if (node.type === 'folder' && node.children) {
             console.log(`Entering folder: ${nodePath}`)
-            await extractFunctionsFromTree(node.children, owner, repo, functionResults, routeResults, modelResults, nodePath)
+            await extractFunctionsFromTree(node.children, owner, repo, dbId, functionResults, routeResults, modelResults, nodePath)
         } else if (node.type === 'file' && node.name.endsWith('.js') && node.download_url) {
             try {
                 console.log(`Fetching file: ${nodePath}`)
                 const { data: code } = await axios.get(node.download_url)
                 console.log(`Extracting functions from: ${nodePath}`)
 
-                const extractedFunctions = await extractFunctionMetaData(code, node.name, nodePath, node.download_url)
+                const extractedFunctions = await extractFunctionMetaData(code, node.name, nodePath, node.download_url, dbId)
 
                 if (extractedFunctions && extractedFunctions.length > 0) {
                     console.log(`Found ${extractedFunctions.length} functions in ${nodePath}`)
@@ -63,14 +63,14 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
                 }
 
                 // Extract routes if it's a route file
-                const extractedRoutes = extractRoutesMetaData(code, node.name, nodePath, node.download_url)
+                const extractedRoutes = extractRoutesMetaData(code, node.name, nodePath, node.download_url, dbId)
                 if (extractedRoutes?.length) {
                     console.log(`Found ${extractedRoutes.length} routes in ${nodePath}`)
                     routeResults.push(...extractedRoutes)
                 }
 
                 // Extract models
-                const extractedModels = extractModelMetaData(code, node.name, nodePath, node.download_url)
+                const extractedModels = extractModelMetaData(code, node.name, nodePath, node.download_url, dbId)
                 if (extractedModels?.length) {
                     console.log(`Found ${extractedModels.length} models in ${nodePath}`)
                     modelResults.push(...extractedModels)
@@ -86,27 +86,24 @@ async function extractFunctionsFromTree(tree, owner, repo, functionResults = [],
 }
 
 // Scrape repository structure and function data
-async function scrapeDirectory(owner, repo, skipCache = false) {
+async function scrapeDirectory(owner, repo) {
     const tree = await fetchTree(owner, repo)
-
+    let dbId = null
     if (tree && tree.length > 0) {
-      const repoId = `${owner}/${repo}`
+        const repoId = `${owner}/${repo}`
         try {
-        const res = await client.query('SELECT id FROM meta_owner WHERE repo_id = $1', [repoId])
-        if (res.rowCount === 0) {
-          await client.query('INSERT INTO meta_owner (repo_id) VALUES ($1)', [repoId])
-          console.log(`Inserted repo ${repoId} into meta_owner`)
-        } else {
-          console.log(`Repo ${repoId} already exists in meta_owner`)
-        }
+            const res = await client.query('SELECT id FROM meta_owner WHERE repo_id = $1', [repoId])
+            dbId = res.rows.length > 0 ? res.rows[0].id : null
+            if (res.rowCount === 0) {
+                const data = await client.query('INSERT INTO meta_owner (repo_id) VALUES ($1)', [repoId])
+                dbId = data.rows[0].id
+                console.log(`Inserted repo ${repoId} into meta_owner`)
+            }
         } catch (err) {
-        console.error(`DB error inserting repo ${repoId}: ${err.message}`)
-      }
+            console.error(`DB error inserting repo ${repoId}: ${err.message}`)
+        }
     }
-    const { functionResults, routeResults, modelResults } = await extractFunctionsFromTree(tree, owner, repo)
-    
-    // // enrich data with summaries
-    // await enrichAllMetadata(functionCachePath)
+    const { functionResults, routeResults, modelResults } = await extractFunctionsFromTree(tree, owner, repo, dbId)
     return { tree, functionResults, routeResults, modelResults }
 }
 

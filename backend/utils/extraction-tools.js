@@ -15,7 +15,7 @@ function resolveImportedPath(importedFrom, downloadUrl) {
 }
 
 // This function extracts Express routes from a given code string.
-function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
+function extractRoutesMetaData(code, fileName, filePath, downloadUrl, dbId) {
     const ast = parser.parse(code, {
         sourceType: 'module'
     })
@@ -99,7 +99,7 @@ function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
                     filePath: `${filePath}`,
                     downloadUrl
                 }
-                await sendToKafka('summary-topic', { type: "route", data: routesData })
+                await sendToKafka('summary-topic', { db: dbId, type: "route", data: routesData })
                 routes.push(routesData)
             }
 
@@ -131,7 +131,7 @@ function extractRoutesMetaData(code, fileName, filePath, downloadUrl) {
 }
 
 // This function metadata extracts functions from a given code string.
-async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
+async function extractFunctionMetaData(code, fileName, filePath, downloadUrl, dbId) {
     try {
         if (typeof code !== 'string') {
             throw new Error('Invalid code input: Expected a string')
@@ -299,7 +299,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                 file: fileName,
                 path: filePath
             }
-            await sendToKafka('summary-topic', { type: "function", data: functionData })
+            await sendToKafka('summary-topic', { db: dbId, type: "function", data: functionData })
             functions.push(functionData)
         }
 
@@ -350,7 +350,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
                         file: fileName,
                         path: filePath
                     }
-                    await sendToKafka('summary-topic', { type: "function", data: functionData })
+                    await sendToKafka('summary-topic', { db: dbId, type: "function", data: functionData })
                     functions.push(functionData)
                 }
             }
@@ -364,7 +364,7 @@ async function extractFunctionMetaData(code, fileName, filePath, downloadUrl) {
 }
 
 // This function extracts Mongoose model metadata from a given code string.
-function extractModelMetaData(code, fileName, filePath, downloadUrl) {
+function extractModelMetaData(code, fileName, filePath, downloadUrl, dbId) {
     try {
         if (typeof code !== 'string') {
             throw new Error('Invalid code input: Expected a string')
@@ -476,7 +476,7 @@ function extractModelMetaData(code, fileName, filePath, downloadUrl) {
                         path: filePath,
                         downloadUrl
                     }
-                    sendToKafka('summary-topic', { type: "model", data: modelData })
+                    sendToKafka('summary-topic', { db: dbId, type: "model", data: modelData })
                     models.push(modelData)
                 }
             }

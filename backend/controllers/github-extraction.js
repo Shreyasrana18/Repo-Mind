@@ -2,14 +2,13 @@ const { scrapeDirectory } = require('./extract-function')
 
 async function scrape(req, res) {
   const repo = req.query.repo
-  const skipCache = req.query.skipCache === 'true'
   if (!repo || !repo.startsWith('https://github.com/')) {
     return res.status(400).json({ error: 'Invalid or missing repo URL' })
   }
 
   try {
     const [_, user, project] = new URL(repo).pathname.split('/')
-    const { tree: tree, functionResults: functionMetaData, routeResults: routesMetadata, modelResults: modelMetadata } = await scrapeDirectory(user, project, skipCache)
+    const { tree: tree, functionResults: functionMetaData, routeResults: routesMetadata, modelResults: modelMetadata } = await scrapeDirectory(user, project)
 
     if (!Array.isArray(tree)) {
       return res.status(500).json({ error: 'Repository structure is not an array' })
