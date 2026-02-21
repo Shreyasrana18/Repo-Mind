@@ -8,16 +8,13 @@ async function scrape(req, res) {
 
   try {
     const [_, user, project] = new URL(repo).pathname.split('/')
-    const { tree: tree, functionResults: functionMetaData, routeResults: routesMetadata, modelResults: modelMetadata } = await scrapeDirectory(user, project)
+    const { tree: tree } = await scrapeDirectory(user, project)
 
     if (!Array.isArray(tree)) {
       return res.status(500).json({ error: 'Repository structure is not an array' })
     }
     res.status(200).json({ 
-      structure: tree, 
-      functions: functionMetaData, 
-      routes: routesMetadata,
-      models: modelMetadata 
+      structure: tree
     })
   } catch (err) {
     console.error(`Error: ${err.message}`)

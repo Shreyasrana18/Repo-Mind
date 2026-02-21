@@ -1,6 +1,5 @@
 const axios = require("axios")
-const cosine = require("./cosine")
-const embeddingStore = require("../controllers/Shreyasrana18-Notes-API-functions.json")
+const db = require('../db/knex')
 
 
 async function generateEmbeddings(texts) {
@@ -9,48 +8,32 @@ async function generateEmbeddings(texts) {
     })
     return data.embeddings[0]
 }
-async function searchInCategories(query, categories) {
-    let allResults = []
 
-    const queryEmbedding = await generateEmbeddings(query)
+async function searchEmbeddings(query) {
+  if (!query) return []
 
-    for (const category of categories) {
-        const store = embeddingStore[category]
-        if (!store) continue
+  const queryEmbedding = await generateEmbeddings(query)
 
-        const results = store
-            .map(item => ({
-                name: item.name,
-                summary: item.textSummary,
-                score: cosine.cosineSimilarity(queryEmbedding, item.embedding)
-            }))
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 5)
+  if (!queryEmbedding?.length) {
+    throw new Error('Failed to generate query embedding')
+  }
 
-        allResults.push(...results)
-    }
+  const vectorString = `[${queryEmbedding.join(',')}]`
 
-    return allResults
-}
+  const results = await db('meta_data')
+    .select(
+      'id',
+      'name',
+      'file',
+      'path',
+      'text_summary as summary',
+      db.raw('1 - (embedding <=> ?::vector) as score', [vectorString])
+    )
+    .whereNotNull('embedding')
+    .orderByRaw('embedding <=> ?::vector', [vectorString])
+    .limit(10)
 
-
-function detectCategories(query) {
-    const qLower = query.toLowerCase()
-    const categories = []
-
-    if (qLower.includes("function") || qLower.includes("method")) {
-        categories.push("functionResults")
-    }
-    if (qLower.includes("route") || qLower.includes("endpoint") || qLower.includes("path")) {
-        categories.push("routeResults")
-    }
-    if (qLower.includes("structure") || qLower.includes("file") || qLower.includes("folder")) {
-        categories.push("structure")
-    }
-    if (qLower.includes("model") || qLower.includes("schema")) {
-        categories.push("modelResults")
-    }
-    return categories
+  return results
 }
 
 const buildPrompt = (userQuery, results) => {
@@ -74,4 +57,4 @@ const buildPrompt = (userQuery, results) => {
                 `.trim()
 }
 
-module.exports = { buildPrompt, detectCategories, searchInCategories, generateEmbeddings }
+module.exports = { buildPrompt, searchInCategories: searchEmbeddings, generateEmbeddings }

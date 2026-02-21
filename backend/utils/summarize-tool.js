@@ -2,70 +2,50 @@ const fs = require('fs/promises')
 const path = require('path')
 const axios = require('axios')
 require('dotenv').config()
-const API_KEY = process.env.ai_key
-const API_KEY_HORIZON = process.env.ai_key_2
-const API_KEY_GPT = process.env.ai_key_gpt
-
-
+const DOMAIN_URL = "http://172.20.10.2:11434"
 const contextSearch = async (prompt) => {
     try {
-        const messages = [
-            {
-                role: 'user',
-                content: [
-                    { type: 'text', text: prompt }
-                ]
-            }
-        ]
         const res = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
+            `${DOMAIN_URL}/api/generate`,
             {
-                model: 'openai/gpt-oss-20b:free',
-                messages
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${API_KEY_GPT}`
+                model: 'mistral:7b-instruct-q4_K_M',
+                prompt,
+                stream: false,
+                options: {
+                    temperature: 0.2,
+                    top_p: 0.9
                 }
             }
         )
-        return res.data.choices?.[0]?.message?.content?.trim() || ''
+        return res.data?.response?.trim() || ''
     } catch (err) {
-        console.error(`Error generating summary: ${err.message}`)
+        console.error('Error generating context answer:', err.response?.data || err.message)
         return ''
     }
 }
-const generateTextSummaryHorizonBeta = async (prompt, record) => {
+
+module.exports = { contextSearch }
+const callLlmGenerate = async (prompt, record) => {
     try {
-        const messages = [
-            {
-                role: 'user',
-                content: [
-                    { type: 'text', text: prompt }
-                ]
-            }
-        ]
         const res = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
+            `${DOMAIN_URL}/api/generate`,
             {
-                model: 'openai/gpt-oss-20b:free',
-                messages
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${API_KEY_HORIZON}`
-                }
+                model: 'mistral:7b-instruct-q4_K_M',
+                prompt,
+                stream: false
             }
         )
-        return res.data.choices?.[0]?.message?.content?.trim() || ''
+        return (res.data?.response || '').trim()
+
     } catch (err) {
-        console.error(`Error generating summary (Horizon Beta) for ${record.file || record.name}: ${err.message}`)
+        console.error(
+            `Error generating summary for ${record?.file || record?.name}:`,
+            err.response?.data || err.message
+        )
         return ''
     }
 }
-const generateTextSummary = async (record, type) => {
+const generateCodeSummary = async (record, type) => {
     let content = ''
 
     if (type === 'function') {
@@ -83,30 +63,7 @@ const generateTextSummary = async (record, type) => {
     }
 
     const prompt = `Given the following code metadata, write a short 1–2 sentence summary describing what the code does:\n\n${content}`
-    return await generateTextSummaryHorizonBeta(prompt, record)
+    return await callLlmGenerate(prompt, record)
 }
 
-const enrichAllMetadata = async (inputFilePath) => {
-    const parsed = JSON.parse(await fs.readFile(inputFilePath, 'utf-8'))
-    const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
-
-    const enrichArray = async (arr, type) => {
-        for (const record of arr) {
-            if (!record.textSummary || record.textSummary.trim() === '') {
-                const summary = await generateTextSummary(record, type)
-                console.log(`Generated summary for ${type} ${record.name || record.file}`)
-                record.textSummary = summary
-                await delay(2000)
-            }
-        }
-    }
-
-    await enrichArray(parsed.functionResults, 'function')
-    await enrichArray(parsed.routeResults, 'route')
-    await enrichArray(parsed.modelResults, 'model')
-
-    await fs.writeFile(inputFilePath, JSON.stringify(parsed, null, 2), 'utf-8')
-    console.log(`✅ Metadata enriched and saved to ${path.basename(inputFilePath)}`)
-}
-
-module.exports = { enrichAllMetadata, generateTextSummaryHorizonBeta, contextSearch, generateTextSummary }
+module.exports = { generateCodeSummary, contextSearch, callLlmGenerate }

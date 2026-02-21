@@ -7,12 +7,11 @@ async function search(req, res) {
         if (!q || typeof q !== 'string') {
             return res.status(400).json({ error: 'Invalid or missing query parameter' })
         }
-        const categories = searchUtil.detectCategories(q) // TODO make this more flexible and score wise detect categories
-        const results = await searchUtil.searchInCategories(q, categories)
+        const results = await searchUtil.searchInCategories(q)
         const prompt = searchUtil.buildPrompt(q, results)
         const answer = await contextSearch(prompt)
 
-        res.json({ query: q, categories, answer, sources: results })
+        res.json({ query: q, answer, sources: results })
     } catch (err) {
         console.error(err)
         res.status(500).json({ error: 'Search failed' })

@@ -3,612 +3,479 @@ const path = require('path')
 const traverse = require('@babel/traverse').default
 const { sendToKafka } = require('../kafka/producer')
 
+
+const PARSER_OPTS = {
+    sourceType: 'module',
+    locations: true,
+    plugins: ['typescript', 'jsx', 'classProperties', 'decorators-legacy']
+}
+
+
+const HTTP_METHODS = new Set([
+    'get', 'post', 'put', 'patch', 'delete', 'all', 'use', 'head', 'options'
+])
+
+
+const TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$|__tests__[/\\]|[/\\]test[/\\]/
+
+
+const SKIP_CALLBACKS = new Set([
+    'listen', 'then', 'catch', 'finally', 'on', 'once',
+    'setTimeout', 'setInterval', 'forEach', 'map', 'filter',
+    'reduce', 'find', 'some', 'every', 'connect', 'send',
+    'describe', 'it', 'test', 'before', 'after',
+    'beforeEach', 'afterEach', 'beforeAll', 'afterAll',
+    'request', 'end', 'nextTick', 'setImmediate'
+])
+
+
+
+
+// ─── Shared Utilities ────────────────────────────────────────
+
+
+function safeParse(code) {
+    return parser.parse(code, PARSER_OPTS)
+}
+
+
+function isTestFile(filePath) {
+    return TEST_FILE_RE.test(filePath)
+}
+
+
 function resolveImportedPath(importedFrom, downloadUrl) {
+    if (!importedFrom.startsWith('.') && !importedFrom.startsWith('/')) {
+        return importedFrom
+    }
     const repoPath = downloadUrl
         .replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, '')
         .split('/')
         .slice(0, -1)
         .join('/')
-
-    const resolvedPath = path.normalize(path.join(repoPath, importedFrom))
-    return resolvedPath
+    const normalized = `./${importedFrom.replace(/^\.\//, '')}`
+    return path.normalize(path.join(repoPath, normalized))
 }
 
-// This function extracts Express routes from a given code string.
-function extractRoutesMetaData(code, fileName, filePath, downloadUrl, dbId) {
-    const ast = parser.parse(code, {
-        sourceType: 'module'
-    })
 
-    const routes = []
-    const seen = new Set()
-    const importMap = {}
-
-    // First pass: capture imports and require statements
+function buildImportMap(ast) {
+    const map = {}
     traverse(ast, {
-        ImportDeclaration(path) {
-            const source = path.node.source.value
-            path.node.specifiers.forEach(spec => {
-                if (spec.type === 'ImportSpecifier' || spec.type === 'ImportDefaultSpecifier') {
-                    importMap[spec.local.name] = source
-                }
+        ImportDeclaration({ node }) {
+            const src = node.source.value
+            node.specifiers.forEach(s => {
+                if (s.local?.name) map[s.local.name] = src
             })
         },
-        VariableDeclaration(path) {
-            path.node.declarations.forEach(decl => {
-                if (
-                    decl.init &&
-                    decl.init.type === 'CallExpression' &&
-                    decl.init.callee.name === 'require' &&
-                    decl.init.arguments.length === 1 &&
-                    decl.init.arguments[0].type === 'StringLiteral'
-                ) {
-                    const source = decl.init.arguments[0].value
-                    if (decl.id.type === 'ObjectPattern') {
-                        decl.id.properties.forEach(prop => {
-                            importMap[prop.value.name] = source
-                        })
-                    } else if (decl.id.type === 'Identifier') {
-                        importMap[decl.id.name] = source
-                    }
-                }
-            })
+        VariableDeclarator({ node }) {
+            if (node.init?.type !== 'CallExpression') return
+            if (node.init.callee?.name !== 'require') return
+            const arg = node.init.arguments?.[0]
+            if (arg?.type !== 'StringLiteral') return
+            if (node.id.type === 'Identifier') {
+                map[node.id.name] = arg.value
+            } else if (node.id.type === 'ObjectPattern') {
+                node.id.properties.forEach(p => {
+                    const name = p.value?.name || p.key?.name
+                    if (name) map[name] = arg.value
+                })
+            }
         }
     })
+    return map
+}
 
-    // Second pass: extract route declarations
+
+function resolveHandler(name, importMap, downloadUrl) {
+    const src = importMap[name]
+    if (!src) return { name, importedFrom: null }
+    return { name, importedFrom: resolveImportedPath(src, downloadUrl) }
+}
+
+
+
+
+// ─── Route Extraction ────────────────────────────────────────
+
+
+async function extractRoutesMetaData(code, fileName, filePath, downloadUrl, dbId) {
+    if (isTestFile(filePath)) return
+
+
+    let ast
+    try { ast = safeParse(code) } catch { return }
+
+
+    const importMap = buildImportMap(ast)
+    const seen = new Set()
+    const routerVars = findRouterVars(ast)
+    const results = []
+
+
     traverse(ast, {
-        CallExpression(path) {
-            const { callee, arguments: args } = path.node
+        CallExpression(nodePath) {
+            const { callee, arguments: args } = nodePath.node
+            if (callee.type !== 'MemberExpression') return
 
-            const processRoute = async (routePathNode, methodNode, argList) => {
-                if (!routePathNode || routePathNode.type !== 'StringLiteral') return
 
-                const method = methodNode.name?.toUpperCase()
-                if (!method || method === 'ROUTE') return
+            let method, routePath, handlerArgs
 
-                const routePath = routePathNode.value
-                const routeKey = `${method}:${routePath}`
-                if (seen.has(routeKey)) return
-                seen.add(routeKey)
 
-                const allHandlers = argList.map(arg => {
-                    const name = arg.name || 'anonymous'
-                    const importPath = importMap[name] || null
-                    if (!importPath) {
-                        return { name, importedFrom: null }
-                    }
-                    const normalizedPath = importPath.startsWith('.')
-                        ? `./${importPath.replace(/^\.\//, '')}`
-                        : importPath
-
-                    const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
-
-                    return {
-                        name,
-                        importedFrom: resolvedPath
-                    }
-                })
-                const routesData = {
-                    kind: 'route',
-                    path: routePath,
-                    method,
-                    middlewares: allHandlers.slice(0, -1),
-                    handler: allHandlers.at(-1),
-                    file: fileName,
-                    filePath: `${filePath}`,
-                    downloadUrl
-                }
-                await sendToKafka('summary-topic', { db: dbId, type: "route", data: routesData })
-                routes.push(routesData)
-            }
-
-            // router.route('/path').get(...)
+            // router.route('/path').get(handler)
             if (
-                callee.type === 'MemberExpression' &&
-                callee.object.type === 'CallExpression' &&
-                callee.object.callee.type === 'MemberExpression' &&
-                callee.object.callee.property.name === 'route'
+                callee.object?.type === 'CallExpression' &&
+                callee.object.callee?.property?.name === 'route'
             ) {
-                const routePathNode = callee.object.arguments[0]
-                processRoute(routePathNode, callee.property, args)
+                routePath = callee.object.arguments[0]?.value
+                method = callee.property?.name?.toLowerCase()
+                handlerArgs = args
             }
-
-            // router.get('/path', ...)
-            if (
-                callee.type === 'MemberExpression' &&
-                callee.object.name === 'router' &&
-                args.length > 0 &&
-                args[0].type === 'StringLiteral'
+            // router.get('/path', handler) | app.post('/path', handler)
+            else if (
+                routerVars.has(callee.object?.name) &&
+                args[0]?.type === 'StringLiteral'
             ) {
-                const routePathNode = args[0]
-                processRoute(routePathNode, callee.property, args.slice(1))
+                method = callee.property?.name?.toLowerCase()
+                routePath = args[0].value
+                handlerArgs = args.slice(1)
             }
-        }
-    })
 
-    return routes
-}
 
-// This function metadata extracts functions from a given code string.
-async function extractFunctionMetaData(code, fileName, filePath, downloadUrl, dbId) {
-    try {
-        if (typeof code !== 'string') {
-            throw new Error('Invalid code input: Expected a string')
-        }
+            if (!method || !HTTP_METHODS.has(method) || typeof routePath !== 'string') return
 
-        let ast
-        try {
-            if (code.trim().startsWith('{')) {
-                ast = JSON.parse(code)
-            } else {
-                ast = parser.parse(code, {
-                    sourceType: 'module',
-                    locations: true,
-                })
-            }
-        } catch (parseErr) {
-            throw new Error(`Code parsing failed: ${parseErr.message}`)
-        }
 
-        const importMap = {}
-        const functions = []
+            const key = `${method}:${routePath}`
+            if (seen.has(key)) return
+            seen.add(key)
 
-        // Capture import and require statements to help resolve where functions come from
-        traverse(ast, {
-            ImportDeclaration(path) {
-                const source = path.node.source.value
-                path.node.specifiers.forEach(spec => {
-                    if (spec.type === 'ImportSpecifier' || spec.type === 'ImportDefaultSpecifier') {
-                        importMap[spec.local.name] = source
-                    }
-                })
-            },
-            VariableDeclaration(path) {
-                path.node.declarations.forEach(decl => {
-                    if (
-                        decl.init &&
-                        decl.init.type === 'CallExpression' &&
-                        decl.init.callee.name === 'require' &&
-                        decl.init.arguments.length === 1 &&
-                        decl.init.arguments[0].type === 'StringLiteral'
-                    ) {
-                        const source = decl.init.arguments[0].value
-                        if (decl.id.type === 'ObjectPattern') {
-                            decl.id.properties.forEach(prop => {
-                                importMap[prop.value.name] = source
-                            })
-                        } else if (decl.id.type === 'Identifier') {
-                            importMap[decl.id.name] = source
-                        }
-                    }
-                })
-            }
-        })
 
-        function extractUsedFunctions(funcPath, importMap) {
-            const used = []
+            const handlers = handlerArgs
+                .map(a => a.name || a.callee?.name)
+                .filter(Boolean)
+                .map(name => resolveHandler(name, importMap, downloadUrl))
 
-            // Collect all variables declared or passed into this function
-            const declaredVariables = new Set()
 
-            // Add function parameters (req, res, next)
-            funcPath.node.params?.forEach(param => {
-                if (param.type === 'Identifier') declaredVariables.add(param.name)
-            })
-
-            // Traverse inside the function to collect used functions
-            funcPath.traverse({
-                VariableDeclarator(innerPath) {
-                    if (innerPath.node.id.type === 'Identifier') {
-                        declaredVariables.add(innerPath.node.id.name)
-                    }
-                },
-                FunctionDeclaration(innerPath) {
-                    if (innerPath.node.id?.name) {
-                        declaredVariables.add(innerPath.node.id.name)
-                    }
-                },
-                CallExpression(innerPath) {
-                    const callee = innerPath.node.callee
-
-                    if (callee.type === 'Identifier') {
-                        if (!declaredVariables.has(callee.name)) {
-                            const importedFrom = importMap[callee.name]
-                            if (importedFrom) {
-                                if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
-                                    const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
-                                    const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
-                                    used.push({
-                                        name: callee.name,
-                                        importedFrom: resolvedPath,
-                                        type: 'module'
-                                    })
-                                } else {
-                                    used.push({
-                                        name: callee.name,
-                                        importedFrom: importedFrom,
-                                        type: 'library'
-                                    })
-                                }
-                            }
-                        }
-                    }
-
-                    if (callee.type === 'MemberExpression') {
-                        const object = callee.object
-                        const property = callee.property
-
-                        if (
-                            object.type === 'Identifier' &&
-                            property.type === 'Identifier' &&
-                            !declaredVariables.has(object.name)
-                        ) {
-                            const importedFrom = importMap[object.name]
-                            if (importedFrom) {
-                                if (importedFrom.startsWith('.') || importedFrom.startsWith('/')) {
-                                    // Local file/module
-                                    const normalizedPath = `./${importedFrom.replace(/^\.\//, '')}`
-                                    const resolvedPath = resolveImportedPath(normalizedPath, downloadUrl)
-
-                                    used.push({
-                                        name: `${object.name}.${property.name}`,
-                                        importedFrom: resolvedPath,
-                                        type: 'module'
-                                    })
-                                } else {
-                                    // Library
-                                    used.push({
-                                        name: `${object.name}.${property.name}`,
-                                        importedFrom: importedFrom,
-                                        type: 'library'
-                                    })
-                                }
-                            }
-                        }
-                    }
-                }
-            })
-
-            return used
-        }
-
-        function detectFunctionType(paramsLength, baseType) {
-            if (paramsLength === 2) return "RouteHandler"
-            if (paramsLength > 2) return "Middleware"
-            return baseType
-        }
-
-        const collectFunction = async (name, baseType, path) => {
-            const { start, end } = path.node
-            const funcCode = code.slice(start, end)
-            const usedFns = extractUsedFunctions(path, importMap)
-            const paramsLength = path.node.params?.length || 0
-            const actualType = detectFunctionType(paramsLength, baseType)
-
-            const functionData = {
-                name,
-                type: actualType,
-                location: {
-                    start: path.node.loc.start,
-                    end: path.node.loc.end
-                },
-                code: funcCode,
-                downloadUrl,
-                functionsUsed: usedFns,
+            results.push({
+                kind: 'route',
+                path: routePath,
+                method: method.toUpperCase(),
+                middlewares: handlers.slice(0, -1),
+                handler: handlers.at(-1) || null,
                 file: fileName,
-                path: filePath
-            }
-            await sendToKafka('summary-topic', { db: dbId, type: "function", data: functionData })
-            functions.push(functionData)
-        }
-
-        traverse(ast, {
-            FunctionDeclaration(path) {
-                collectFunction(path.node.id.name, 'FunctionDeclaration', path)
-            },
-            ArrowFunctionExpression(path) {
-                let name = 'anonymous'
-                if (
-                    path.parent.type === 'CallExpression' &&
-                    path.parentPath.parent.type === 'VariableDeclarator' &&
-                    path.parentPath.parent.id.type === 'Identifier'
-                ) {
-                    name = path.parentPath.parent.id.name
-                } else if (
-                    path.parent.type === 'VariableDeclarator' &&
-                    path.parent.id.type === 'Identifier'
-                ) {
-                    name = path.parent.id.name
-                } else if (
-                    path.parent.type === 'ObjectProperty' &&
-                    path.parent.key.type === 'Identifier'
-                ) {
-                    name = path.parent.key.name
-                }
-
-                collectFunction(name, 'ArrowFunction', path)
-            },
-            async AssignmentExpression(path) {
-                if (
-                    path.node.left.type === 'MemberExpression' &&
-                    path.node.left.object.name === 'module' &&
-                    path.node.left.property.name === 'exports'
-                ) {
-                    const { start, end } = path.node
-                    const funcCode = code.slice(start, end)
-
-                    const functionData = {
-                        name: path.node.left.property.name,
-                        type: 'Exported Function',
-                        location: {
-                            start: path.node.loc.start,
-                            end: path.node.loc.end
-                        },
-                        code: funcCode,
-                        functionsUsed: [],
-                        file: fileName,
-                        path: filePath
-                    }
-                    await sendToKafka('summary-topic', { db: dbId, type: "function", data: functionData })
-                    functions.push(functionData)
-                }
-            }
-        })
-
-        return functions
-    } catch (err) {
-        console.error(`Error parsing code in ${fileName}:`, err.message)
-        return []
-    }
-}
-
-// This function extracts Mongoose model metadata from a given code string.
-function extractModelMetaData(code, fileName, filePath, downloadUrl, dbId) {
-    try {
-        if (typeof code !== 'string') {
-            throw new Error('Invalid code input: Expected a string')
-        }
-
-        const ast = parser.parse(code, {
-            sourceType: 'module',
-            locations: true,
-        })
-
-        const models = []
-        const importMap = {}
-
-        // First pass: capture imports and require statements
-        traverse(ast, {
-            ImportDeclaration(path) {
-                const source = path.node.source.value
-                path.node.specifiers.forEach(spec => {
-                    if (spec.type === 'ImportSpecifier' || spec.type === 'ImportDefaultSpecifier') {
-                        importMap[spec.local.name] = source
-                    }
-                })
-            },
-            VariableDeclaration(path) {
-                path.node.declarations.forEach(decl => {
-                    if (
-                        decl.init &&
-                        decl.init.type === 'CallExpression' &&
-                        decl.init.callee.name === 'require' &&
-                        decl.init.arguments.length === 1 &&
-                        decl.init.arguments[0].type === 'StringLiteral'
-                    ) {
-                        const source = decl.init.arguments[0].value
-                        if (decl.id.type === 'ObjectPattern') {
-                            decl.id.properties.forEach(prop => {
-                                importMap[prop.value.name] = source
-                            })
-                        } else if (decl.id.type === 'Identifier') {
-                            importMap[decl.id.name] = source
-                        }
-                    }
-                })
-            }
-        })
-
-        // Second pass: extract model definitions
-        traverse(ast, {
-            CallExpression(path) {
-                // Look for mongoose.model() calls
-                if (
-                    path.node.callee.type === 'MemberExpression' &&
-                    path.node.callee.object.name === 'mongoose' &&
-                    path.node.callee.property.name === 'model' &&
-                    path.node.arguments.length >= 2
-                ) {
-                    const modelName = path.node.arguments[0].value
-
-                    // Find the schema definition
-                    let schemaDefinition = null
-                    let schemaNode = null
-
-                    // Look for schema definition in the AST
-                    traverse(ast, {
-                        VariableDeclaration(schemaPath) {
-                            schemaPath.node.declarations.forEach(decl => {
-                                if (
-                                    decl.id.name === 'noteSchema' ||
-                                    decl.id.name === 'userSchema' ||
-                                    decl.id.name.toLowerCase().includes('schema')
-                                ) {
-                                    if (decl.init && decl.init.type === 'CallExpression' &&
-                                        decl.init.callee.type === 'MemberExpression' &&
-                                        decl.init.callee.object.name === 'mongoose' &&
-                                        decl.init.callee.property.name === 'Schema') {
-                                        schemaDefinition = decl.init
-                                        schemaNode = decl.init.arguments[0]
-                                    }
-                                }
-                            })
-                        }
-                    })
-
-                    // Extract schema definition
-                    const schema = {}
-                    if (schemaNode && schemaNode.type === 'ObjectExpression') {
-                        schemaNode.properties.forEach(prop => {
-                            if (prop.key.type === 'Identifier') {
-                                const fieldName = prop.key.name
-                                const fieldDefinition = extractFieldDefinition(prop.value)
-                                schema[fieldName] = fieldDefinition
-                            }
-                        })
-                    }
-
-                    // Get the full model code
-                    const modelCode = code.slice(path.node.start, path.node.end)
-                    const schemaCode = schemaDefinition ? code.slice(schemaDefinition.start, schemaDefinition.end) : ''
-
-                    const modelData = {
-                        name: modelName,
-                        schema,
-                        location: {
-                            start: path.node.loc.start,
-                            end: path.node.loc.end
-                        },
-                        code: modelCode,
-                        schemaCode: schemaCode,
-                        file: fileName,
-                        path: filePath,
-                        downloadUrl
-                    }
-                    sendToKafka('summary-topic', { db: dbId, type: "model", data: modelData })
-                    models.push(modelData)
-                }
-            }
-        })
-
-        return models
-    } catch (err) {
-        console.error(`Error parsing model in ${fileName}:`, err.message)
-        return []
-    }
-}
-
-// Helper function to extract field definition information
-function extractFieldDefinition(node) {
-    const fieldDef = {
-        type: 'Mixed',
-        required: false,
-        default: undefined,
-        unique: false,
-        index: false,
-        validate: undefined,
-        enum: undefined,
-        min: undefined,
-        max: undefined,
-        minlength: undefined,
-        maxlength: undefined,
-        match: undefined,
-        ref: undefined,
-        sparse: false,
-        trim: false,
-        uppercase: false,
-        lowercase: false
-    }
-
-    if (node.type === 'ObjectExpression') {
-        node.properties.forEach(prop => {
-            const propName = prop.key.name
-            const propValue = prop.value
-
-            switch (propName) {
-                case 'type':
-                    if (propValue.type === 'MemberExpression') {
-                        fieldDef.type = propValue.property.name
-                    } else if (propValue.type === 'StringLiteral') {
-                        fieldDef.type = propValue.value
-                    } else if (propValue.type === 'ArrayExpression') {
-                        fieldDef.type = 'Array'
-                        fieldDef.items = propValue.elements.map(elem => {
-                            if (elem.type === 'MemberExpression') {
-                                return elem.property.name
-                            }
-                            return elem.value
-                        })
-                    }
-                    break
-                case 'required':
-                    fieldDef.required = propValue.value
-                    break
-                case 'default':
-                    if (propValue.type === 'CallExpression' &&
-                        propValue.callee.name === 'Date' &&
-                        propValue.callee.property?.name === 'now') {
-                        fieldDef.default = 'Date.now'
-                    } else {
-                        fieldDef.default = propValue.value
-                    }
-                    break
-                case 'unique':
-                    fieldDef.unique = propValue.value
-                    break
-                case 'index':
-                    fieldDef.index = propValue.value
-                    break
-                case 'validate':
-                    if (propValue.type === 'ObjectExpression') {
-                        fieldDef.validate = {
-                            validator: propValue.properties.find(p => p.key.name === 'validator')?.value.value,
-                            message: propValue.properties.find(p => p.key.name === 'message')?.value.value
-                        }
-                    }
-                    break
-                case 'enum':
-                    if (propValue.type === 'ArrayExpression') {
-                        fieldDef.enum = propValue.elements.map(elem => elem.value)
-                    }
-                    break
-                case 'min':
-                    fieldDef.min = propValue.value
-                    break
-                case 'max':
-                    fieldDef.max = propValue.value
-                    break
-                case 'minlength':
-                    fieldDef.minlength = propValue.value
-                    break
-                case 'maxlength':
-                    fieldDef.maxlength = propValue.value
-                    break
-                case 'match':
-                    fieldDef.match = propValue.value
-                    break
-                case 'ref':
-                    fieldDef.ref = propValue.value
-                    break
-                case 'sparse':
-                    fieldDef.sparse = propValue.value
-                    break
-                case 'trim':
-                    fieldDef.trim = propValue.value
-                    break
-                case 'uppercase':
-                    fieldDef.uppercase = propValue.value
-                    break
-                case 'lowercase':
-                    fieldDef.lowercase = propValue.value
-                    break
-            }
-        })
-    } else if (node.type === 'MemberExpression') {
-        fieldDef.type = node.property.name
-    } else if (node.type === 'StringLiteral') {
-        fieldDef.type = node.value
-    }
-
-    // Remove undefined properties
-    Object.keys(fieldDef).forEach(key => {
-        if (fieldDef[key] === undefined) {
-            delete fieldDef[key]
+                filePath,
+                downloadUrl
+            })
         }
     })
 
-    return fieldDef
+
+    for (const data of results) {
+        await sendToKafka('summary-topic', { db: dbId, type: 'route', data })
+    }
+}
+
+
+function findRouterVars(ast) {
+    const vars = new Set(['router', 'app'])
+    traverse(ast, {
+        VariableDeclarator({ node }) {
+            if (!node.id?.name || !node.init) return
+            const init = node.init
+            if (init.type === 'CallExpression') {
+                // express.Router()
+                if (init.callee?.property?.name === 'Router') vars.add(node.id.name)
+                // express()
+                if (init.callee?.name === 'express') vars.add(node.id.name)
+            }
+        }
+    })
+    return vars
+}
+
+
+
+
+// ─── Function Extraction ─────────────────────────────────────
+
+
+async function extractFunctionMetaData(code, fileName, filePath, downloadUrl, dbId) {
+    if (isTestFile(filePath)) return
+
+    let ast
+    try { ast = safeParse(code) } catch { return }
+
+
+    const importMap = buildImportMap(ast)
+    const collected = new Set()
+    const results = []
+
+
+    function getFuncName(nodePath) {
+        const parent = nodePath.parent
+        if (parent.type === 'VariableDeclarator') return parent.id?.name
+        // const x = asyncHandler((req, res) => {})
+        if (
+            parent.type === 'CallExpression' &&
+            nodePath.parentPath?.parent?.type === 'VariableDeclarator'
+        ) {
+            return nodePath.parentPath.parent.id?.name
+        }
+        // exports.login = () => {} or module.exports.login = () => {}
+        if (parent.type === 'AssignmentExpression' && parent.left?.type === 'MemberExpression') {
+            const prop = parent.left.property?.name
+            if (prop && prop !== 'exports') return prop
+        }
+        if (parent.type === 'ObjectProperty') return parent.key?.name
+        return null
+    }
+
+
+    function isCallbackArg(nodePath) {
+        if (nodePath.parent.type !== 'CallExpression') return false
+        const callee = nodePath.parent.callee
+        const name = callee?.name || callee?.property?.name
+        return Boolean(name && SKIP_CALLBACKS.has(name))
+    }
+
+
+    function isTrivial(node, funcCode) {
+        if (funcCode.length < 30) return true
+        if (!node.body || node.body.type !== 'BlockStatement') return false
+        const stmts = node.body.body.filter(s => s.type !== 'EmptyStatement')
+        if (stmts.length === 0) return true
+        if (
+            stmts.length === 1 &&
+            stmts[0].type === 'ExpressionStatement' &&
+            stmts[0].expression?.callee?.object?.name === 'console'
+        ) return true
+        return false
+    }
+
+
+    function classifyType(paramsLen, base) {
+        if (paramsLen === 2) return 'RouteHandler'
+        if (paramsLen >= 3) return 'Middleware'
+        return base
+    }
+
+
+    function extractDeps(funcPath) {
+        const deps = []
+        const locals = new Set()
+        funcPath.node.params?.forEach(p => {
+            if (p.type === 'Identifier') locals.add(p.name)
+        })
+
+
+        funcPath.traverse({
+            VariableDeclarator(p) { if (p.node.id?.name) locals.add(p.node.id.name) },
+            FunctionDeclaration(p) { if (p.node.id?.name) locals.add(p.node.id.name) },
+            CallExpression(p) {
+                const callee = p.node.callee
+                let name, lookup
+
+
+                if (callee.type === 'Identifier') {
+                    name = callee.name
+                    lookup = callee.name
+                } else if (
+                    callee.type === 'MemberExpression' &&
+                    callee.object?.type === 'Identifier'
+                ) {
+                    name = `${callee.object.name}.${callee.property?.name}`
+                    lookup = callee.object.name
+                } else return
+
+
+                if (locals.has(lookup)) return
+                const src = importMap[lookup]
+                if (!src) return
+
+
+                const isLocal = src.startsWith('.') || src.startsWith('/')
+                deps.push({
+                    name,
+                    importedFrom: isLocal ? resolveImportedPath(src, downloadUrl) : src,
+                    type: isLocal ? 'module' : 'library'
+                })
+            }
+        })
+
+
+        const seen = new Set()
+        return deps.filter(d => {
+            if (seen.has(d.name)) return false
+            seen.add(d.name)
+            return true
+        })
+    }
+
+
+    function emit(name, baseType, funcPath) {
+        if (!name || name === 'anonymous' || collected.has(name)) return
+        const node = funcPath.node
+        const funcCode = code.slice(node.start, node.end)
+        if (isTrivial(node, funcCode)) return
+
+
+        collected.add(name)
+        results.push({
+            name,
+            type: classifyType(node.params?.length || 0, baseType),
+            location: { start: node.loc.start, end: node.loc.end },
+            code: funcCode,
+            downloadUrl,
+            functionsUsed: extractDeps(funcPath),
+            file: fileName,
+            filePath
+        })
+    }
+
+
+    traverse(ast, {
+        FunctionDeclaration(p) {
+            if (p.node.id?.name) emit(p.node.id.name, 'FunctionDeclaration', p)
+        },
+        FunctionExpression(p) {
+            if (isCallbackArg(p)) return
+            const name = getFuncName(p) || p.node.id?.name
+            if (name) emit(name, 'FunctionExpression', p)
+        },
+        ArrowFunctionExpression(p) {
+            if (isCallbackArg(p)) return
+            const name = getFuncName(p)
+            if (name) emit(name, 'ArrowFunction', p)
+        }
+    })
+
+
+    for (const data of results) {
+        await sendToKafka('summary-topic', { db: dbId, type: 'function', data })
+    }
+}
+
+
+
+
+// ─── Model Extraction ────────────────────────────────────────
+
+
+async function extractModelMetaData(code, fileName, filePath, downloadUrl, dbId) {
+    if (isTestFile(filePath)) return
+
+
+    let ast
+    try { ast = safeParse(code) } catch { return }
+
+
+    // Collect all Schema definitions keyed by variable name
+    const schemas = {}
+    traverse(ast, {
+        VariableDeclarator({ node }) {
+            if (!node.id?.name || !node.init) return
+            const init = node.init
+            const isSchema =
+                (init.type === 'NewExpression' || init.type === 'CallExpression') &&
+                init.callee?.type === 'MemberExpression' &&
+                init.callee.property?.name === 'Schema'
+            if (isSchema && init.arguments?.[0]?.type === 'ObjectExpression') {
+                schemas[node.id.name] = {
+                    definition: init,
+                    fieldsNode: init.arguments[0]
+                }
+            }
+        }
+    })
+
+
+    // Match mongoose.model('Name', schemaVar) to collected schemas
+    const results = []
+    traverse(ast, {
+        CallExpression(nodePath) {
+            const node = nodePath.node
+            if (node.callee?.type !== 'MemberExpression') return
+            if (node.callee.property?.name !== 'model') return
+            if (node.arguments.length < 2) return
+
+
+            const modelName = node.arguments[0]?.value
+            if (!modelName) return
+
+
+            const schemaVarName = node.arguments[1]?.name
+            const schemaInfo = schemaVarName ? schemas[schemaVarName] : null
+
+
+            const schema = {}
+            if (schemaInfo?.fieldsNode) {
+                schemaInfo.fieldsNode.properties.forEach(prop => {
+                    const fieldName = prop.key?.name || prop.key?.value
+                    if (fieldName) schema[fieldName] = extractFieldDef(prop.value)
+                })
+            }
+
+
+            results.push({
+                name: modelName,
+                schema,
+                location: { start: node.loc.start, end: node.loc.end },
+                code: code.slice(node.start, node.end),
+                schemaCode: schemaInfo
+                    ? code.slice(schemaInfo.definition.start, schemaInfo.definition.end)
+                    : '',
+                file: fileName,
+                filePath,
+                downloadUrl
+            })
+        }
+    })
+
+
+    for (const data of results) {
+        await sendToKafka('summary-topic', { db: dbId, type: 'model', data })
+    }
+}
+
+
+function extractFieldDef(node) {
+    if (!node) return { type: 'Mixed' }
+    if (node.type === 'Identifier') return { type: node.name }
+    if (node.type === 'MemberExpression') return { type: node.property?.name || 'Mixed' }
+    if (node.type !== 'ObjectExpression') return { type: 'Mixed' }
+
+
+    const def = {}
+    const handlers = {
+        type: v => v.type === 'Identifier' ? v.name : (v.property?.name || v.value || 'Mixed'),
+        required: v => v.value,
+        unique: v => v.value,
+        index: v => v.value,
+        ref: v => v.value,
+        trim: v => v.value,
+        lowercase: v => v.value,
+        uppercase: v => v.value,
+        min: v => v.value,
+        max: v => v.value,
+        minlength: v => v.value,
+        maxlength: v => v.value,
+        enum: v => v.type === 'ArrayExpression' ? v.elements.map(e => e.value) : undefined,
+        default: v => {
+            if (v.type === 'MemberExpression') return `${v.object?.name}.${v.property?.name}`
+            return v.value
+        }
+    }
+
+
+    node.properties.forEach(prop => {
+        const key = prop.key?.name
+        if (key && handlers[key]) {
+            const val = handlers[key](prop.value)
+            if (val !== undefined) def[key] = val
+        }
+    })
+
+
+    return Object.keys(def).length ? def : { type: 'Mixed' }
 }
 
 
@@ -617,3 +484,6 @@ module.exports = {
     extractFunctionMetaData,
     extractModelMetaData
 }
+
+
+
