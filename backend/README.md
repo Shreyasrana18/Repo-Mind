@@ -1,17 +1,111 @@
-# Kafka (single-node) in Docker
+# 📌 What This Project Does
 
-This README shows a simple way to run a single-node Kafka broker (broker + controller) using the official apache/kafka image.
+## 🧾 Non-Technical Overview
+
+This system analyzes a GitHub repository and transforms it into a searchable, AI-powered knowledge base. It:
+
+- Reads all files in the repository.
+- Understands the structure and functions.
+- Generates summaries for key components.
+- Stores the processed data in a searchable format.
+
+After processing, you can search the project and get intelligent answers based strictly on the repository’s actual code and metadata.
+
+---
+
+## ⚙ Technical Overview
+
+### Step 1: Repository Parsing (Backend)
+
+- The backend receives a GitHub repository URL.
+- Recursively parses the entire codebase to extract:
+    - Functions
+    - Routes
+    - Middleware
+    - Models
+    - File metadata
+- Builds structured metadata objects.
+- Sends metadata to Kafka.
+
+---
+
+### Step 2: Summary Generation (Kafka → Summary Worker)
+
+- The **summary worker** consumes metadata messages from Kafka.
+- An LLM generates a concise `text_summary` for each metadata unit.
+- The enriched metadata is forwarded to the next stage.
+
+---
+
+### Step 3: Embedding Generation (Kafka → Embedding Worker)
+
+- The **embedding worker** consumes summarized metadata.
+- Calls the Python embedding service to generate vector embeddings for each `text_summary`.
+- Stores the final structured metadata and embeddings into PostgreSQL (pgvector).
+
+---
+
+### Step 4: Semantic Search
+
+- A user submits a search query.
+- The query is embedded into a vector.
+- A vector similarity search runs against stored embeddings.
+- Top relevant metadata is returned.
+- Responses are generated strictly from stored repository metadata.
+
+---
+
+## 🏗 High-Level Flow
+
+```
+GitHub Repo URL
+↓
+Backend Parser
+↓
+Kafka
+↓
+Summary Worker (LLM)
+↓
+Embedding Worker (Vector Generation)
+↓
+PostgreSQL (pgvector)
+↓
+Semantic Search API
+```
+
+
+
+
+# Kafka (Single-Node) in Docker
+
+This guide demonstrates how to run a **single-node Kafka broker (broker + controller)** using the official `apache/kafka` image for local development.
+
+---
 
 ## Prerequisites
-- Docker installed and running
 
-## Start Kafka
-Run the following (stops & removes any existing `kafka` container first):
+Ensure the following are installed and running:
+
+- Docker
+- Node.js (v18+ recommended)
+- Python 3.8+
+- PostgreSQL
+- Backend dependencies (`npm install`)
+
+---
+
+## 1️⃣ Start Kafka
+
+### Stop and Remove Existing Kafka Container
 
 ```bash
 docker stop kafka || true
 docker rm kafka || true
+```
 
+### Run Kafka
+
+```bash
 docker run -d \
     --name kafka \
     -p 9092:9092 \
@@ -32,27 +126,122 @@ docker run -d \
     apache/kafka:latest
 ```
 
-This exposes Kafka on localhost:9092. The configuration runs Kafka as both broker and controller (suitable for local dev/testing).
+Kafka will be available at: `localhost:9092`
 
-## Verify
-List topics or create one using the container's kafka tools (adjust path if different in the image):
+---
+
+## 2️⃣ Verify Kafka
+
+### Create a Test Topic
 
 ```bash
-# create a topic
-docker exec -it kafka kafka-topics.sh --create --topic test-topic --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
-
-# list topics
-docker exec -it kafka kafka-topics.sh --list --bootstrap-server localhost:9092
+docker exec -it kafka kafka-topics.sh \
+    --create \
+    --topic test-topic \
+    --bootstrap-server localhost:9092 \
+    --partitions 3 \
+    --replication-factor 1
 ```
 
-## Stop & remove
+### List Topics
+
+```bash
+docker exec -it kafka kafka-topics.sh \
+    --list \
+    --bootstrap-server localhost:9092
+```
+
+---
+
+## 3️⃣ Run Backend (Node.js)
+
+### Navigate to Backend Root
+
+```bash
+cd /Users/shreyasrana/Development/Personal/github-explain/backend
+```
+
+### Install Dependencies (if not done)
+
+```bash
+npm install
+```
+
+### Start Backend
+
+- **Production Mode**: `npm start`
+- **Development Mode (nodemon)**: `npm run dev`
+
+---
+
+## 4️⃣ Run Workers (Node.js)
+
+From the backend root:
+
+- **Embedding Worker**: `npm run embedding-worker`
+- **Summary Worker**: `npm run summary-worker`
+
+These correspond to the following scripts in `package.json`:
+
+```json
+"scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "embedding-worker": "node workers/embedding-worker.js",
+    "summary-worker": "node workers/summary-worker.js"
+}
+```
+
+---
+
+## 5️⃣ Run Python Embedding Service (FastAPI / Uvicorn)
+
+### Navigate to the Embeddings Directory
+
+```bash
+cd /Users/shreyasrana/Development/Personal/github-explain/backend/embedding
+```
+
+### Start the Service
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+The service will be available at: [http://localhost:8000](http://localhost:8000)
+
+---
+
+## 🛑 Stop Kafka
+
 ```bash
 docker stop kafka
 docker rm kafka
 ```
 
-Notes:
-- This setup is for local development/testing only (single-node, PLAINTEXT). For production use a multi-node cluster with proper security and replication.
-- If you need external access from other machines, change KAFKA_ADVERTISED_LISTENERS to an appropriate host/IP.
-- Adjust CLUSTER_ID or remove it if you want Kafka to auto-generate one.
-- KAFKA_AUTO_CREATE_TOPICS_ENABLE=true will auto-create topics on first use — disable in stricter environments.
+---
+
+## 🔎 Architecture Overview
+
+```
+Client → Node Backend → Kafka → Workers →
+                                         ↓
+                                Python Embedding Service
+                                         ↓
+                                PostgreSQL (pgvector)
+```
+
+- **Backend** produces Kafka messages.
+- **Workers** consume messages.
+- **Embedding Worker** calls the Python embedding service.
+- Results are stored in **PostgreSQL (pgvector)**.
+
+---
+
+## ⚠ Notes
+
+- This setup is for local development only.
+- Kafka runs in PLAINTEXT mode.
+- Single broker, no replication safety.
+- `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true` is for development only.
+- For multi-machine access, update the advertised listeners accordingly.
